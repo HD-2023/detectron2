@@ -333,7 +333,13 @@ class COCOEvaluator(DatasetEvaluator):
         Returns:
             a dict of {metric name: score}
         """
-
+        def _get_thr_ind(coco_eval, thr):
+            ind = np.where((coco_eval.params.iouThrs > thr - 1e-5) &
+                           (coco_eval.params.iouThrs < thr + 1e-5))[0][0]
+            iou_thr = coco_eval.params.iouThrs[ind]
+            assert np.isclose(iou_thr, thr)
+            return ind
+        
         metrics = {
             "bbox": ["AP", "AP50", "AP75", "APs", "APm", "APl"],
             "segm": ["AP", "AP50", "AP75", "APs", "APm", "APl"],
@@ -363,29 +369,44 @@ class COCOEvaluator(DatasetEvaluator):
         # precision has dims (iou, recall, cls, area range, max dets)
         assert len(class_names) == precisions.shape[2]
 
-        results_per_category = []
-        for idx, name in enumerate(class_names):
-            # area range index 0: all area ranges
-            # max dets index -1: typically 100 per image
-            precision = precisions[:, :, idx, 0, -1]
-            precision = precision[precision > -1]
-            ap = np.mean(precision) if precision.size else float("nan")
-            results_per_category.append(("{}".format(name), float(ap * 100)))
+        for thres in [0.95, 0.50]:
+            # calculate indices for different thresholds
+            IoU_lo_thresh = 0.50
+            IoU_hi_thresh = thres
+            ind_lo = _get_thr_ind(coco_eval, IoU_lo_thresh)
+            ind_hi = _get_thr_ind(coco_eval, IoU_hi_thresh)
+            
+            results_per_category = []
+            for idx, name in enumerate(class_names):
+                # area range index 0: all area ranges
+                # max dets index -1: typically 100 per image
+                precision = precisions[ind_lo:(ind_hi + 1), :, idx, 0, -1]
+                precision = precision[precision > -1]
+                ap = np.mean(precision) if precision.size else float("nan")
+                results_per_category.append(("{}".format(name), float(ap * 100)))
 
-        # tabulate it
-        N_COLS = min(6, len(results_per_category) * 2)
-        results_flatten = list(itertools.chain(*results_per_category))
-        results_2d = itertools.zip_longest(*[results_flatten[i::N_COLS] for i in range(N_COLS)])
-        table = tabulate(
-            results_2d,
-            tablefmt="pipe",
-            floatfmt=".3f",
-            headers=["category", "AP"] * (N_COLS // 2),
-            numalign="left",
-        )
-        self._logger.info("Per-category {} AP: \n".format(iou_type) + table)
+            IoU_lo_thresh = int(IoU_lo_thresh * 100)
+            IoU_hi_thresh = int(IoU_hi_thresh * 100)
+            if IoU_lo_thresh != IoU_hi_thresh:
+                prefix = f"AP"
+            else:
+                prefix = f"AP{IoU_lo_thresh}"
 
-        results.update({"AP-" + name: ap for name, ap in results_per_category})
+            # tabulate it
+            N_COLS = min(6, len(results_per_category) * 2)
+            results_flatten = list(itertools.chain(*results_per_category))
+            results_2d = itertools.zip_longest(*[results_flatten[i::N_COLS] for i in range(N_COLS)])
+            table = tabulate(
+                results_2d,
+                tablefmt="pipe",
+                floatfmt=".3f",
+                headers=["category", prefix] * (N_COLS // 2),
+                numalign="left",
+            )
+            self._logger.info("Per-category {} {}: \n".format(iou_type, prefix) + table)
+
+            results.update({prefix + "-" + name: ap for name, ap in results_per_category})
+        
         return results
 
 
